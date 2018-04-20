@@ -11,7 +11,7 @@ _ui = adsk.core.UserInterface.cast(None)
 handlers = []
 
 
-def CreateDado(face1, edge1, width, depth, offset):
+def CreateDado(face1, edge1, width, depth, offset, drawOnlySketch):
     try:
         face = adsk.fusion.BRepFace.cast(face1)
         edge = adsk.fusion.BRepEdge.cast(edge1)
@@ -96,48 +96,52 @@ def CreateDado(face1, edge1, width, depth, offset):
         line3 = skLines.addByTwoPoints(line2.endSketchPoint, pnt4)
         line4 = skLines.addByTwoPoints(line3.endSketchPoint, line1.startSketchPoint)
         
-        sk.geometricConstraints.addPerpendicular(line1, line2)
-        sk.geometricConstraints.addPerpendicular(line2, line3)
-        sk.geometricConstraints.addPerpendicular(line3, line4)
-        sk.geometricConstraints.addCoincident(line1.startSketchPoint, skOtherLine1)
-        sk.geometricConstraints.addCoincident(line1.endSketchPoint, skOtherLine2)
-        sk.geometricConstraints.addParallel(skLine, line1)
-        
-        if offset == 0:
-            sk.geometricConstraints.addCoincident(line1.startSketchPoint, skLine)
-        
-        if offset != 0:
+        if not drawOnlySketch:
+            sk.geometricConstraints.addPerpendicular(line1, line2)
+            sk.geometricConstraints.addPerpendicular(line2, line3)
+            sk.geometricConstraints.addPerpendicular(line3, line4)
+            sk.geometricConstraints.addCoincident(line1.startSketchPoint, skOtherLine1)
+            sk.geometricConstraints.addCoincident(line1.endSketchPoint, skOtherLine2)
+            sk.geometricConstraints.addParallel(skLine, line1)
+            
+            if offset == 0:
+                sk.geometricConstraints.addCoincident(line1.startSketchPoint, skLine)
+            
+            if offset != 0:
+                dimPoint = mid1.copy()
+                offsetDir.normalize()
+                offsetDir.scaleBy(offset/2)
+                dimPoint.translateBy(offsetDir)
+                offsetDim = sk.sketchDimensions.addOffsetDimension(skLine, line1, dimPoint)
+            
             dimPoint = mid1.copy()
             offsetDir.normalize()
-            offsetDir.scaleBy(offset/2)
-            dimPoint.translateBy(offsetDir)
-            offsetDim = sk.sketchDimensions.addOffsetDimension(skLine, line1, dimPoint)
-        
-        dimPoint = mid1.copy()
-        offsetDir.normalize()
-        offsetDir.scaleBy(offset + (width/2))
-        dimPoint.translateBy(offsetDir)        
-        offsetDim = sk.sketchDimensions.addOffsetDimension(line1, line3, dimPoint)
-        
-        prof = adsk.fusion.Profile.cast(None)
-        goodProf = None
-        for prof in sk.profiles:
-            areaProps = prof.areaProperties()
-            if WithinTol(areaProps.area, line1.length * line2.length, 0.0001):
-                goodProf = prof
-                break
+            offsetDir.scaleBy(offset + (width/2))
+            dimPoint.translateBy(offsetDir)        
+            offsetDim = sk.sketchDimensions.addOffsetDimension(line1, line3, dimPoint)
             
-        extInput = comp.features.extrudeFeatures.createInput(goodProf, adsk.fusion.FeatureOperations.CutFeatureOperation)
-        extInput.setDistanceExtent(False, adsk.core.ValueInput.createByReal(-depth))
-        ext = comp.features.extrudeFeatures.add(extInput)
-        
-        des = comp.parentDesign
-        tlNode = des.timeline.timelineGroups.add(sk.timelineObject.index, ext.timelineObject.index)
-        
-        if offset == 0:
-            tlNode.name = 'Dado'
-        else:
-            tlNode.name = 'Rabbet'
+            prof = adsk.fusion.Profile.cast(None)
+            goodProf = None
+            for prof in sk.profiles:
+                areaProps = prof.areaProperties()
+                if WithinTol(areaProps.area, line1.length * line2.length, 0.0001):
+                    goodProf = prof
+                    break
+                
+            extInput = comp.features.extrudeFeatures.createInput(goodProf, adsk.fusion.FeatureOperations.CutFeatureOperation)
+            extInput.setDistanceExtent(False, adsk.core.ValueInput.createByReal(-depth))
+            try:
+                ext = comp.features.extrudeFeatures.add(extInput)
+    
+                des = comp.parentDesign
+                tlNode = des.timeline.timelineGroups.add(sk.timelineObject.index, ext.timelineObject.index)
+                
+                if offset == 0:
+                    tlNode.name = 'Rabbet'
+                else:
+                    tlNode.name = 'Dado'
+            except:
+                pass        
     except:
         if _ui:
             _ui.messageBox('Failed:\n{}'.format(traceback.format_exc())) 
@@ -154,85 +158,130 @@ class DadoRabbetCommandChangedHandler(adsk.core.InputChangedEventHandler):
     def __init__(self):
         super().__init__()
     def notify(self, args):
-        eventArgs = adsk.core.InputChangedEventArgs.cast(args)
+        try:
+            eventArgs = adsk.core.InputChangedEventArgs.cast(args)
+    
+            offsetInput = adsk.core.DistanceValueCommandInput.cast(eventArgs.inputs.itemById('distInput'))
+            if eventArgs.input.id == 'jointType':
+                # Toggle the visibility of the offset input depending on if a dado or rabbet is selected.
+                jointType = adsk.core.DropDownCommandInput.cast(eventArgs.input)
+                if jointType.selectedItem.name == 'Dado':
+                    offsetInput.isVisible = True
+                elif jointType.selectedItem.name == 'Rabbet':
+                    offsetInput.isVisible = False
+            elif eventArgs.input.id == 'faceSelect':
+                # When a face is selected, enable the edge selection.
+                eventArgs.inputs.itemById('edgeSelect').isEnabled = True
+    
+            # if the selection of the face or edge has changed update the offset input.
+            if eventArgs.input.id == 'faceSelect' or eventArgs.input.id == 'edgeSelect':
+                # if a face and and edge is selected update the position of he offset manipulator.
+                if eventArgs.inputs.itemById('faceSelect').selectionCount == 1 and eventArgs.inputs.itemById('edgeSelect').selectionCount == 1:           
+                    offsetInput.isEnabled = True
+    
+                    # Get the face and edge and use them to determine the position and direction
+                    # of the ofset manipulator arrow.    
+                    edge = eventArgs.inputs.itemById('edgeSelect').selection(0).entity
+                    face = eventArgs.inputs.itemById('faceSelect').selection(0).entity            
+                    midPnt = adsk.core.Point3D.create((edge.startVertex.geometry.x + edge.endVertex.geometry.x)*0.5, 
+                                                      (edge.startVertex.geometry.y + edge.endVertex.geometry.y)*0.5,
+                                                      (edge.startVertex.geometry.z + edge.endVertex.geometry.z)*0.5)
+                    dirVec = midPnt.vectorTo(face.pointOnFace)
+                    edgeVec = edge.startVertex.geometry.vectorTo(edge.endVertex.geometry)
+                    tempVec = edgeVec.crossProduct(dirVec)
+                    dirVec = tempVec.crossProduct(edgeVec) 
+                    dirVec.normalize()                                  
+                    offsetInput.setManipulator(midPnt, dirVec)
+                else:
+                    # Both a face and edge are not selected so disable the offset input.
+                    offsetInput = adsk.core.DistanceValueCommandInput.cast(eventArgs.inputs.itemById('distInput'))
+                    offsetInput.isEnabled = False
+        except:
+            if _ui:
+                _ui.messageBox('Failed:\n{}'.format(traceback.format_exc()))
 
-        if eventArgs.input.id == 'jointType':
-            jointType = adsk.core.DropDownCommandInput.cast(eventArgs.input)
-            offsetInput = eventArgs.inputs.itemById('offsetInput')
-            if jointType.selectedItem.name == 'Dado':
-                offsetInput.isVisible = True
-            elif jointType.selectedItem.name == 'Rabbet':
-                offsetInput.isVisible = False
-        elif eventArgs.input.id == 'faceSelect':
-            eventArgs.inputs.itemById('edgeSelect').isEnabled = True
+            
 
-
-# Event handler for the selectionEvent event.
+# Event handler for the selectionEvent event to control what the user can
+# select. It makes sure they can only pick planar faces that have linear
+# edges around the outside. And only edges that are on the selected face.
 class DadoRabbetCommandSelectionEventHandler(adsk.core.SelectionEventHandler):
     def __init__(self):
         super().__init__()
     def notify(self, args):
-        eventArgs = adsk.core.SelectionEventArgs.cast(args)
-        
-        if eventArgs.activeInput.id == 'faceSelect':
-            face = eventArgs.selection.entity
-            if isValidFace(face):
-                eventArgs.isSelectable = True
-            else:
-                eventArgs.isSelectable = False
-        elif eventArgs.activeInput.id == 'edgeSelect':
-            inputs = adsk.core.CommandInputs.cast(eventArgs.firingEvent.sender.commandInputs)
-            faceSelect = adsk.core.SelectionCommandInput.cast(inputs.itemById('faceSelect'))
-            if faceSelect.selectionCount == 1:
-                face = faceSelect.selection(0).entity
-                edge = eventArgs.selection.entity
-                if isValidEdge(face, edge):
+        try:
+            eventArgs = adsk.core.SelectionEventArgs.cast(args)
+            
+            if eventArgs.activeInput.id == 'faceSelect':
+                face = eventArgs.selection.entity
+                if isValidFace(face):
                     eventArgs.isSelectable = True
                 else:
                     eventArgs.isSelectable = False
-            else:
-                eventArgs.isSelectable = False
+            elif eventArgs.activeInput.id == 'edgeSelect':
+                inputs = adsk.core.CommandInputs.cast(eventArgs.firingEvent.sender.commandInputs)
+                faceSelect = adsk.core.SelectionCommandInput.cast(inputs.itemById('faceSelect'))
+                if faceSelect.selectionCount == 1:
+                    face = faceSelect.selection(0).entity
+                    edge = eventArgs.selection.entity
+                    if isValidEdge(face, edge):
+                        eventArgs.isSelectable = True
+                    else:
+                        eventArgs.isSelectable = False
+                else:
+                    eventArgs.isSelectable = False
+        except:
+            if _ui:
+                _ui.messageBox('Failed:\n{}'.format(traceback.format_exc()))
 
 
 def isValidEdge(face, edge):
-    if edge.geometry.curveType != adsk.core.Curve3DTypes.Line3DCurveType:
-        return False
-        
-    if edge.faces.item(0) == face:
-        return True
-    elif edge.faces.item(1) == face:
-        return True
-        
-    return False
-       
-
-def isValidFace(face):
-    outerLoop = adsk.fusion.BRepLoop.cast(None)
-    loop = adsk.fusion.BRepLoop.cast(None)
-    for loop in face.loops:
-        if loop.isOuter:
-            outerLoop = loop
-            break
-
-    if outerLoop.edges.count != 4:
-        return False
-        
-    edge = adsk.fusion.BRepEdge.cast(None)
-    lineVectors = []
-    for edge in loop.edges:
-        ln = adsk.core.Line3D.cast(edge.geometry)
-        lineVectors.append(ln.startPoint.vectorTo(ln.endPoint))
+    try:
         if edge.geometry.curveType != adsk.core.Curve3DTypes.Line3DCurveType:
             return False
             
-    if not lineVectors[0].isPerpendicularTo(lineVectors[1]):
+        if edge.faces.item(0) == face:
+            return True
+        elif edge.faces.item(1) == face:
+            return True
+            
         return False
-    elif not lineVectors[0].isParallelTo(lineVectors[2]):
-        return False
-    elif not lineVectors[0].isPerpendicularTo(lineVectors[3]):
-        return False
+    except:
+        if _ui:
+            _ui.messageBox('Failed:\n{}'.format(traceback.format_exc()))
+       
 
-    return True
+def isValidFace(face):
+    try:
+        outerLoop = adsk.fusion.BRepLoop.cast(None)
+        loop = adsk.fusion.BRepLoop.cast(None)
+        for loop in face.loops:
+            if loop.isOuter:
+                outerLoop = loop
+                break
+    
+        if outerLoop.edges.count != 4:
+            return False
+            
+        edge = adsk.fusion.BRepEdge.cast(None)
+        lineVectors = []
+        for edge in loop.edges:
+            ln = adsk.core.Line3D.cast(edge.geometry)
+            lineVectors.append(ln.startPoint.vectorTo(ln.endPoint))
+            if edge.geometry.curveType != adsk.core.Curve3DTypes.Line3DCurveType:
+                return False
+                
+        if not lineVectors[0].isPerpendicularTo(lineVectors[1]):
+            return False
+        elif not lineVectors[0].isParallelTo(lineVectors[2]):
+            return False
+        elif not lineVectors[0].isPerpendicularTo(lineVectors[3]):
+            return False
+    
+        return True
+    except:
+        if _ui:
+            _ui.messageBox('Failed:\n{}'.format(traceback.format_exc()))
 
 
 # Event handler for the executePreview event.
@@ -240,43 +289,59 @@ class DadoRabbetCommandExecutePreviewHandler(adsk.core.CommandEventHandler):
     def __init__(self):
         super().__init__()
     def notify(self, args):
-        eventArgs = adsk.core.CommandEventArgs.cast(args)
-        inputs = eventArgs.command.commandInputs
-
-        # Get the values of all of the inputs.
-        face = inputs.itemById('faceSelect').selection(0).entity
-        edge = inputs.itemById('edgeSelect').selection(0).entity
-        width = inputs.itemById('widthInput').value
-        depth = inputs.itemById('depthInput').value
-        if inputs.itemById('jointType').selectedItem.name == 'Dado':
-            offset = inputs.itemById('offsetInput').value
-        else:
-            offset = 0
+        try:
+            eventArgs = adsk.core.CommandEventArgs.cast(args)
+            inputs = eventArgs.command.commandInputs
+    
+            # Get the values of all of the inputs.
+            face = adsk.fusion.BRepFace.cast(inputs.itemById('faceSelect').selection(0).entity)
+            edge = adsk.fusion.BRepEdge.cast(inputs.itemById('edgeSelect').selection(0).entity)
+            width = inputs.itemById('widthInput').value
+            depth = inputs.itemById('depthInput').value
             
-        CreateDado(face, edge, width, depth, offset)        
-
-        eventArgs.isValidResult = True
+            # For a dado use the specified offset value and for a rabbet it's 0.
+            if inputs.itemById('jointType').selectedItem.name == 'Dado':
+                offsetInput = adsk.core.DistanceValueCommandInput.cast(inputs.itemById('distInput'))
+                offset = offsetInput.value                     
+            else:
+                offset = 0
+                
+            # Create the dado or rabbet geometry.
+            CreateDado(face, edge, width, depth, offset, False)        
+    
+            # Set the the preview results can be used as the execute result.
+            eventArgs.isValidResult = True
+        except:
+            if _ui:
+                _ui.messageBox('Failed:\n{}'.format(traceback.format_exc()))
 
 
 # Event handler for the execute event.
+# This will never be called in this case because in the ExecutePreview event
+# the isValidResult has been set to True to say that the preview result can
+# be used when the command is executed.
 class DadoRabbetCommandExecuteHandler(adsk.core.CommandEventHandler):
     def __init__(self):
         super().__init__()
     def notify(self, args):
-        eventArgs = adsk.core.CommandEventArgs.cast(args)
-        inputs = eventArgs.command.commandInputs
-
-        # Get the values of all of the inputs.
-        face = inputs.itemById('faceSelect').selection(0).entity
-        edge = inputs.itemById('edgeSelect').selection(0).entity
-        width = inputs.itemById('widthInput').value
-        depth = inputs.itemById('depthInput').value
-        if inputs.itemById('jointType').selectedItem.name == 'Dado':
-            offset = inputs.itemById('offsetInput').value
-        else:
-            offset = 0
-            
-        CreateDado(face, edge, width, depth, offset)        
+        try:
+            eventArgs = adsk.core.CommandEventArgs.cast(args)
+            inputs = eventArgs.command.commandInputs
+    
+            # Get the values of all of the inputs.
+            face = inputs.itemById('faceSelect').selection(0).entity
+            edge = inputs.itemById('edgeSelect').selection(0).entity
+            width = inputs.itemById('widthInput').value
+            depth = inputs.itemById('depthInput').value
+            if inputs.itemById('jointType').selectedItem.name == 'Dado':
+                offset = inputs.itemById('distInput').value
+            else:
+                offset = 0
+                
+            CreateDado(face, edge, width, depth, offset, False)        
+        except:
+            if _ui:
+                _ui.messageBox('Failed:\n{}'.format(traceback.format_exc()))
 
 
 # Event handler for the commandCreated event.
@@ -307,7 +372,9 @@ class DadoRabbetCommandCreatedHandler(adsk.core.CommandCreatedEventHandler):
             uom = des.unitsManager
             inputs.addValueInput('widthInput', 'Width', uom.defaultLengthUnits, adsk.core.ValueInput.createByReal(2.54 * .75))
             inputs.addValueInput('depthInput', 'Depth', uom.defaultLengthUnits, adsk.core.ValueInput.createByReal(2.54 * .375))
-            inputs.addValueInput('offsetInput', 'Offset', uom.defaultLengthUnits, adsk.core.ValueInput.createByReal(2.54 * 12))
+            distInput = inputs.addDistanceValueCommandInput('distInput', 'Offset', adsk.core.ValueInput.createByReal(2.54 * 12))
+            distInput.isEnabled = False
+            #inputs.addValueInput('offsetInput', 'Offset', uom.defaultLengthUnits, adsk.core.ValueInput.createByReal(2.54 * 12))
     
             # Connect to the command events.
             onInputChanged = DadoRabbetCommandChangedHandler()
